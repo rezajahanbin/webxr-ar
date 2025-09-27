@@ -11,13 +11,13 @@
       #fallback{position:fixed;inset:0;display:none}
       model-viewer{width:100%;height:100%}
     </style>
-    <!-- فالبک بسیار ساده بدون کدنویسی AR -->
+    <!-- فالبک ساده -->
     <script type="module" src="https://cdn.jsdelivr.net/npm/@google/model-viewer@3/dist/model-viewer.min.js"></script>
   </head>
   <body>
     <div id="status">در حال بارگذاری…</div>
 
-    <!-- فالبک: اگر WebXR در دسترس نبود -->
+    <!-- فالبک: اگر WebXR/کتابخانه‌ها لود نشدند -->
     <div id="fallback">
       <model-viewer src="character.glb" ar ar-modes="scene-viewer webxr quick-look"
         camera-controls environment-image="neutral" shadow-intensity="0.6">
@@ -28,7 +28,163 @@
       </model-viewer>
     </div>
 
-    <script type="module" src="./main.js"></script>
-    <noscript>برای اجرا باید JavaScript فعال باشد.</noscript>
+    <!-- لودر داینامیک با فالبک بین چند CDN و نمایش پیام‌های وضعیت -->
+    <script type="module">
+      const statusEl = document.getElementById('status');
+      const fallbackEl = document.getElementById('fallback');
+      const show = (m)=>{ console.log(m); statusEl.textContent = m; };
+
+      // تلاش برای بارگذاری از چند CDN
+      async function tryImport(urls){
+        let lastErr;
+        for(const url of urls){
+          try{
+            show('دریافت کتابخانه‌ها… ' + new URL(url).hostname);
+            return await import(url);
+          }catch(e){
+            console.warn('Import failed:', url, e);
+            lastErr = e;
+          }
+        }
+        throw lastErr;
+      }
+
+      // اجرای برنامه
+      (async ()=>{
+        // 1) چک WebXR
+        if (!('xr' in navigator)) {
+          show('WebXR در این مرورگر موجود نیست. فعال‌سازی فالبک…');
+          fallbackEl.style.display = 'block'; return;
+        }
+        const arOk = await navigator.xr.isSessionSupported('immersive-ar').catch(()=>false);
+        if (!arOk) {
+          show('immersive-ar پشتیبانی نمی‌شود. فالبک فعال شد.');
+          fallbackEl.style.display = 'block'; return;
+        }
+
+        // 2) لود THREE/ARButton/GLTFLoader با فالبک CDN
+        const cdn = (p)=>[
+          `https://cdn.jsdelivr.net/npm/${p}`,
+          `https://unpkg.com/${p}`,
+          `https://esm.sh/${p}`
+        ];
+
+        const THREE = await tryImport(cdn('three@0.160.0/build/three.module.js'));
+        const { ARButton } = await tryImport(cdn('three@0.160.0/examples/jsm/webxr/ARButton.js'));
+        const { GLTFLoader } = await tryImport(cdn('three@0.160.0/examples/jsm/loaders/GLTFLoader.js'));
+
+        show('راه‌اندازی صحنه…');
+
+        // 3) راه‌اندازی صحنه و AR
+        let camera, scene, renderer;
+        let reticle, hitTestSource=null, hitTestSourceRequested=false;
+        let model=null, mixer=null, clock=new THREE.Clock();
+
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 20);
+
+        renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.xr.enabled = true;
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 0.6));
+        const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+        dir.position.set(1,2,1);
+        dir.castShadow = true;
+        scene.add(dir);
+
+        reticle = new THREE.Mesh(
+          new THREE.RingGeometry(0.08, 0.1, 32).rotateX(-Math.PI/2),
+          new THREE.MeshBasicMaterial({ color: 0x00ff88 })
+        );
+        reticle.matrixAutoUpdate = false;
+        reticle.visible = false;
+        scene.add(reticle);
+
+        const loader = new GLTFLoader();
+        loader.load('./character.glb', (gltf)=>{
+          model = gltf.scene;
+          model.traverse(o => { if (o.isMesh){ o.castShadow = true; }});
+          model.visible = false;
+          scene.add(model);
+          if (gltf.animations?.length){
+            mixer = new THREE.AnimationMixer(model);
+            const clip = THREE.AnimationClip.findByName(gltf.animations, 'Idle') || gltf.animations[0];
+            mixer.clipAction(clip).play();
+          }
+          show('مدل بارگذاری شد. دکمه Enter AR را بزنید.');
+        }, undefined, (e)=>{
+          console.error('GLB load error:', e);
+          show('خطا در بارگذاری مدل GLB');
+        });
+
+        const btn = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] });
+        document.body.appendChild(btn);
+
+        renderer.xr.addEventListener('sessionstart', ()=>{
+          show('جلسه AR شروع شد. رتیکل را روی زمین پیدا کنید و ضربه بزنید.');
+          const session = renderer.xr.getSession();
+          session.addEventListener('select', ()=>{
+            if (!reticle.visible || !model) return;
+            const m = new THREE.Matrix4().fromArray(reticle.matrix.elements);
+            model.position.setFromMatrixPosition(m);
+            model.quaternion.setFromRotationMatrix(m);
+            model.visible = true;
+          });
+        });
+
+        window.addEventListener('resize', ()=>{
+          camera.aspect = window.innerWidth/window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        renderer.setAnimationLoop((t, frame)=>{
+          const dt = clock.getDelta();
+          if (mixer) mixer.update(dt);
+
+          const session = renderer.xr.getSession?.();
+          if (frame && session){
+            const refSpace = renderer.xr.getReferenceSpace();
+            if (!hitTestSourceRequested){
+              session.requestReferenceSpace('viewer').then((viewerSpace)=>{
+                frame.session.requestHitTestSource({ space: viewerSpace }).then((source)=>{
+                  hitTestSource = source;
+                });
+              }).catch(e=>{
+                console.error(e);
+                show('Hit-test در دسترس نیست.');
+              });
+              hitTestSourceRequested = true;
+            }
+
+            if (hitTestSource){
+              const hits = frame.getHitTestResults(hitTestSource);
+              if (hits.length){
+                const hit = hits[0];
+                const pose = hit.getPose(refSpace);
+                reticle.visible = true;
+                reticle.matrix.fromArray(pose.transform.matrix);
+                statusEl.textContent = 'روی صفحه ضربه بزنید تا کاراکتر قرار بگیرد.';
+              } else {
+                reticle.visible = false;
+                statusEl.textContent = 'در حال جستجوی سطح… دوربین را به زمین و اطراف تکان دهید.';
+              }
+            }
+          }
+
+          renderer.render(scene, camera);
+        });
+
+      })().catch(err=>{
+        console.error(err);
+        // هر خطایی در import/اجرا → فالبک
+        fallbackEl.style.display = 'block';
+        document.getElementById('status').textContent = 'اشکال در بارگذاری کتابخانه‌ها؛ فالبک فعال شد.';
+      });
+    </script>
   </body>
 </html>
