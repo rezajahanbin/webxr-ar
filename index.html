@@ -124,6 +124,16 @@
         const btn = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] });
         document.body.appendChild(btn);
 
+        btn.textContent = 'Enter AR';
+        btn.style.position = 'fixed';
+        btn.style.left = '50%';
+        btn.style.bottom = '80px';   // بالاتر از نوار وضعیت
+        btn.style.transform = 'translateX(-50%)';
+        btn.style.zIndex = '10001';  // بالاتر از همه
+        btn.style.padding = '12px 16px';
+        btn.style.borderRadius = '10px';
+        btn.style.fontSize = '16px';
+
         renderer.xr.addEventListener('sessionstart', ()=>{
           show('جلسه AR شروع شد. رتیکل را روی زمین پیدا کنید و ضربه بزنید.');
           const session = renderer.xr.getSession();
@@ -188,3 +198,4 @@
     </script>
   </body>
 </html>
+
